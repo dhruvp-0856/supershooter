@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>SharpShooter - Aim Trainer</title>
+  <title>SlingShockFPS - v9.6.4</title>
   <style>
     body { margin: 0; overflow: hidden; background-color: #111; font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; user-select: none; }
     
@@ -133,6 +133,7 @@
     .toggle-setting-btn.active { background: #4af; border-color: #4af; color: #fff; }
     .keybind-btn { background: #2a2a36; border: 1px solid #444; color: #fff; padding: 6px 12px; border-radius: 4px; cursor: pointer; min-width: 80px; text-align: center; font-family: monospace; }
     .keybind-btn.listening { background: #ff4655; border-color: #ff8888; }
+    .keybind-btn.conflict { border-color: #ffaa00; box-shadow: 0 0 0 1px #ffaa00; background: #3a2f18; }
     .btn-primary { background: #4af; border: none; color: #fff; padding: 12px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; margin-top: 15px; font-size: 16px; }
     .btn-primary:hover { background: #389ee6; }
     .btn-secondary { background: #2a2a36; border: 1px solid #444; color: #aaa; padding: 8px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; margin-top: 10px; font-size: 13px; transition: 0.2s; }
@@ -453,6 +454,56 @@
     floor.rotation.x = -Math.PI / 2;
     scene.add(floor);
 
+    // --- Rapier Physics: real capsule-based character collision ---
+    // Capsule size is fixed (doesn't shrink for crouch -- crouch stays a
+    // camera-only visual dip, same simplification most simpler FPS games
+    // make rather than resizing colliders at runtime).
+    const CAPSULE_RADIUS = 0.35;
+    const CAPSULE_HALF_HEIGHT = 0.45; // half-length of the cylindrical middle section
+    const CAPSULE_FEET_OFFSET = CAPSULE_HALF_HEIGHT + CAPSULE_RADIUS; // capsule center -> feet
+    const MAX_STEP_HEIGHT = 0.4; // how tall a "step" the built-in autostep will climb
+
+    let physicsReady = false;
+    let physicsWorld = null;
+    let characterController = null;
+    let characterBody = null;
+    let characterCollider = null;
+
+    async function initPhysics() {
+      // The module bridge script (in <head>) may not have finished importing
+      // Rapier yet by the time this runs -- wait for it if not.
+      if (!window.RAPIER) {
+        await new Promise(resolve => window.addEventListener('rapier-module-ready', resolve, { once: true }));
+      }
+      await RAPIER.init();
+      physicsWorld = new RAPIER.World({ x: 0.0, y: -9.81, z: 0.0 });
+
+      // Floor collider matching the visible 100x100 plane at y=0. No map
+      // geometry exists right now, so this is the only static collider --
+      // extending this later (e.g. loading a map's meshes as trimesh
+      // colliders) just means adding more createCollider calls here.
+      const floorBody = physicsWorld.createRigidBody(RAPIER.RigidBodyDesc.fixed());
+      physicsWorld.createCollider(
+        RAPIER.ColliderDesc.cuboid(50, 0.1, 50).setTranslation(0, -0.1, 0), floorBody
+      );
+
+      characterController = physicsWorld.createCharacterController(0.02);
+      characterController.enableAutostep(MAX_STEP_HEIGHT, 0.2, true);
+      characterController.enableSnapToGround(0.3);
+      characterController.setMaxSlopeClimbAngle(55 * Math.PI / 180);
+      characterController.setMinSlopeSlideAngle(40 * Math.PI / 180);
+
+      const bodyDesc = RAPIER.RigidBodyDesc.kinematicPositionBased()
+        .setTranslation(0, CAPSULE_FEET_OFFSET, 0);
+      characterBody = physicsWorld.createRigidBody(bodyDesc);
+      characterCollider = physicsWorld.createCollider(
+        RAPIER.ColliderDesc.capsule(CAPSULE_HALF_HEIGHT, CAPSULE_RADIUS), characterBody
+      );
+
+      physicsReady = true;
+    }
+    initPhysics();
+
     // Controls State
     let isLocked = false;
     let yaw = 0, pitch = 0;
@@ -487,38 +538,32 @@
     const weapons = [
       {
         name: "Combat Knife", type: "knife", color: "cccccc", svg: weaponSVGs.knife,
-        modelPath: "assets/models/tactical_knife.glb",
+        modelPath: "assets/models/knife_animated.glb", isCarbine: false,
         damage: 25.0, attackSpeed: 345, movementSpeed: 1.0, maxAmmo: "--", ammo: "--",
         baseSpread: 0.001, maxSpread: 0.001, spreadIncrement: 0, spreadRecovery: 0.1,
-        recoilKick: 0.015, maxRecoil: 0.015, isMelee: true, isSniper: false, zoomFov: 70,
-        // Calibrated in-game via debug mode (press 9) -- confirmed good.
-        modelTransform: { pos: [0, 0.020, -0.05], rot: [0.120, 1.511, 0.000], scale: 0.1617 }
+        recoilKick: 0.015, maxRecoil: 0.015, isMelee: true, isSniper: false, zoomFov: 70
       },
       { 
         name: "Assault Rifle", type: "ar", color: "3388ff", svg: weaponSVGs.ar, 
-        modelPath: "assets/models/assault_rifle.glb",
+        modelPath: "assets/models/m4_carbine_animated.glb", isCarbine: true,
         damage: 32.0, attackSpeed: 110, movementSpeed: 0.76, maxAmmo: 30, ammo: 30, 
         baseSpread: 0.012, maxSpread: 0.065, spreadIncrement: 0.007, spreadRecovery: 0.12,
         recoilKick: 0.022, maxRecoil: 0.11, isMelee: false, isSniper: false, zoomFov: 60,
         bulletSpeed: 140, // units/sec -- used for gravity drop calc
-        maxMags: 3, reserveMags: 2, // 3 mags total: 1 loaded + 2 spare, 30 rounds each
-        // Calibrated in-game via debug mode (press 9) -- confirmed good.
-        modelTransform: { pos: [0.000, -0.030, 0.020], rot: [0.020, 1.621, 0.020], scale: 0.0887 }
+        maxMags: 3, reserveMags: 2 // 3 mags total: 1 loaded + 2 spare, 30 rounds each
       },
       { 
         name: "Shotgun", type: "shotgun", color: "ff8833", svg: weaponSVGs.shotgun, 
-        modelPath: "assets/models/shotgun.glb",
+        modelPath: "assets/models/shotgun_animated.glb", isCarbine: false,
         damage: 9.125, attackSpeed: 833, movementSpeed: 0.70, maxAmmo: 8, ammo: 8, 
         baseSpread: 0.06, maxSpread: 0.11, spreadIncrement: 0.02, spreadRecovery: 0.15,
         recoilKick: 0.075, maxRecoil: 0.2, pellets: 8, isMelee: false, isSniper: false, zoomFov: 65,
         bulletSpeed: 90,
-        maxMags: 2, reserveMags: 1, // 2 mags total: 1 loaded + 1 spare, 8 shells each
-        // Calibrated in-game via debug mode (press 9) -- confirmed good.
-        modelTransform: { pos: [0.000, -0.280, 0.000], rot: [0.049, -4.580, 0.000], scale: 0.1258 }
+        maxMags: 2, reserveMags: 1 // 2 mags total: 1 loaded + 1 spare, 8 shells each
       },
       { 
         name: "Sniper Rifle", type: "sniper", color: "ff3355", svg: weaponSVGs.sniper, 
-        modelPath: "assets/models/sniper_rifle.glb",
+        modelPath: "assets/models/sniper_animated.glb", isCarbine: false,
         damage: 140.0, attackSpeed: 1667, movementSpeed: 0.50, maxAmmo: 5, ammo: 5, 
         baseSpread: 0.001, maxSpread: 0.03, spreadIncrement: 0.01, spreadRecovery: 0.25,
         recoilKick: 0.11, maxRecoil: 0.24, pellets: 1, isMelee: false, isSniper: true, zoomFov: 20,
@@ -526,9 +571,7 @@
         // NOTE: your notes cut off after "Sniper should" -- defaulted to 2 mags
         // of 5 (matching existing capacity). Change reserveMags/maxMags below if
         // you meant something else.
-        maxMags: 2, reserveMags: 1,
-        // Calibrated in-game via debug mode (press 9) -- confirmed good.
-        modelTransform: { pos: [0.000, 0.055, -0.115], rot: [0.000, 1.611, 0.000], scale: 0.0698 }
+        maxMags: 2, reserveMags: 1
       }
     ];
 
@@ -539,6 +582,11 @@
 
     let currentWeaponIdx = 0;
     let lastShotTime = 0;
+    // Knife's 3-hit combo -- advances one attack per swing within the
+    // window, resets to the first hit if you wait too long between them.
+    let knifeComboIndex = 0;
+    let lastKnifeAttackTime = -Infinity;
+    const KNIFE_COMBO_WINDOW = 1.0; // seconds
     let isReloading = false;
 
     // Short pullout delay -- can't fire for a moment after switching weapons
@@ -555,6 +603,10 @@
 
     const SUSTAINED_SHAKE_MAX = 0.022;  // radians, camera shake cap (lowered)
     const SUSTAINED_SHAKE_TAU = 1.1;    // seconds -- how fast it ramps toward max
+    const SHAKE_PER_SHOT = 0.5;         // "fire time" credited per actual shot landed
+    const SHAKE_DECAY_PER_SEC = 3.0;    // how fast that credit drains when not being topped up --
+                                         // fast enough that a slow weapon's spaced-out shots never
+                                         // accumulate, only genuinely rapid fire does
     let sustainedFireTime = 0;
     let shakeOffsetX = 0, shakeOffsetY = 0;
 
@@ -571,15 +623,17 @@
 
     // R6-Siege-style lean: hold Q/E to tilt + peek sideways
     let leanOffset = 0; // smoothed -1..1
+    // How far (world units) a full lean shifts the camera sideways. The
+    // first pass at this (0.5) was too subtle to actually see past a corner
+    // -- bumped up substantially. Tune this directly if it still isn't
+    // enough once there's real wall geometry to test against.
+    const LEAN_PEEK_DISTANCE = 1.4;
 
     // Debug/model-calibration overlay, toggled with "9"
     let debugMode = false;
-    let debugTuneTarget = 'weapon'; // 'weapon' | 'map' -- press M in debug mode to switch
 
-    // Live collision diagnostics, shown in the debug overlay (press 9) regardless
-    // of tuning target -- lets us see the actual numbers behind a collision bug,
-    // not just what it looks like.
-    let dbgGrounded = false, dbgBodyPos = { x: 0, y: 0, z: 0 }, dbgVelocityY = 0, dbgCorrected = { x: 0, y: 0, z: 0 };
+    // Live physics diagnostics shown in the debug overlay (press 9).
+    let dbgGrounded = false, dbgBodyPos = { x: 0, y: 0, z: 0 };
 
     // Sprint FOV kick + fire-block + sideways sprint-carry pose. Only counts as
     // "actively sprinting" while actually moving -- toggle-sprint left on while
@@ -596,198 +650,151 @@
     camera.add(gunGroup);
     scene.add(camera);
 
-    // Asset Cache & Loader
-    const loadedModels = {};
+    let weaponBobTime = 0;
+    let gunRecoilPos = 0;
+    let gunRecoilRot = 0;
+
+    // Viewmodel Swap Animation Variables
+    let isSwapping = false;
+    let swapOffset = 0;
+
+    // --- Weapon Models (each self-contained: hands + gun + skeleton + its
+    // own animation, exactly as built) ---
+    // Simpler than a shared-hands rig on purpose: cross-skeleton animation
+    // retargeting turned out to have too many failure modes to debug reliably
+    // without being able to render and see it. Each weapon here uses its own
+    // bundled hands instead -- no bone remapping, no rest-pose correction, no
+    // cross-model math. All four are from the same creator on what looks
+    // like the same base rig, so the hands should look close across weapons
+    // even though they're not literally the same mesh.
     const gltfLoader = new THREE.GLTFLoader();
+    const loadedModels = {};      // type -> wrapper Group (contains that weapon's full loaded scene)
+    const weaponClips = {};       // type -> that weapon's own AnimationClip, unmodified
+    const weaponMixers = {};      // type -> its own AnimationMixer (kept separate per weapon --
+                                   // these files reuse bone names like "L_arm_01" across different
+                                   // weapons, so one shared mixer risks cross-binding to the wrong
+                                   // weapon's node of the same name)
+    const weaponActionClips = {}; // type -> { actionName -> sub-clip }
+    let currentAction = null;
 
-    // --- Map Loading ---
-    // Maps live flat under assets/maps/ as map1.glb, map2.glb, map3.glb, etc.
-    // One is picked at random each page load. Add new numbers to MAP_COUNT as
-    // more maps are added -- nothing else needs to change. (Eventually this'll
-    // be driven by matchmaking for 1v1s instead of picked on page load, but
-    // that's a separate piece.)
-    const MAP_COUNT = 1; // bump this as map2.glb, map3.glb, etc. get added
-    // Per-map calibration, confirmed live via the debug tuning tool (press 9,
-    // then M to target the map). Add an entry here for each new map once
-    // you've dialed in its transform the same way -- turns out map1 didn't
-    // actually need the Z-up rotation I originally guessed at; live testing
-    // beats static analysis here.
-    const MAP_TRANSFORMS = {
-      1: { pos: [0, 0, 0], rot: [0, 0, 0], scale: 3.6225 }
+    // Per-weapon whole-model placement. Applied to a WRAPPER group around
+    // each loaded scene, never to a node the file's own animation also
+    // targets -- that exact conflict (animation fighting with manual
+    // positioning) was the core bug in the shared-rig attempt. Starting
+    // everyone at identity since this is a fresh setup with different
+    // semantics than before (whole model now, not just the gun piece) --
+    // use the debug tool (press 9) to dial these in live.
+    const MODEL_TRANSFORMS = {
+      knife:   { pos: [0, 0, 0], rot: [0, 0, 0], scale: 1 },
+      ar:      { pos: [0, 0, 0], rot: [0, 0, 0], scale: 1 },
+      shotgun: { pos: [0, 0, 0], rot: [0, 0, 0], scale: 1 },
+      sniper:  { pos: [0, 0, 0], rot: [0, 0, 0], scale: 1 }
     };
-    const selectedMapNum = Math.floor(Math.random() * MAP_COUNT) + 1;
-    const selectedMapPath = `assets/maps/map${selectedMapNum}.glb`;
-    console.log(`Loading map: map${selectedMapNum}`);
 
-    let loadedMapObject = null;
-    function collectMeshes(root) {
-      const meshes = [];
-      root.traverse(obj => { if (obj.isMesh) meshes.push(obj); });
-      return meshes;
+    function applyModelTransform(type) {
+      const wrapper = loadedModels[type];
+      const t = MODEL_TRANSFORMS[type];
+      if (!wrapper || !t) return;
+      wrapper.position.set(...t.pos);
+      wrapper.rotation.set(...t.rot);
+      wrapper.scale.set(t.scale, t.scale, t.scale);
     }
 
-    // Map loading and physics init both happen async and in no guaranteed
-    // order -- whichever finishes first stashes what it has for the other.
-    let pendingMapMeshesForPhysics = null;
-
-    gltfLoader.load(
-      selectedMapPath,
-      (gltf) => {
-        gltf.scene.name = 'loadedMap';
-        const t = MAP_TRANSFORMS[selectedMapNum];
-        if (t) {
-          gltf.scene.position.set(t.pos[0], t.pos[1], t.pos[2]);
-          gltf.scene.rotation.set(t.rot[0], t.rot[1], t.rot[2]);
-          gltf.scene.scale.setScalar(t.scale);
+    // Slices a [startTime, endTime] (seconds) range out of a clip as its own
+    // standalone clip, re-zeroed to start at t=0.
+    function extractTimeRange(sourceClip, name, startTime, endTime) {
+      const newTracks = sourceClip.tracks.map(track => {
+        const times = track.times, values = track.values;
+        const stride = values.length / times.length;
+        const newTimes = [], newValues = [];
+        for (let i = 0; i < times.length; i++) {
+          if (times[i] >= startTime && times[i] <= endTime) {
+            newTimes.push(times[i] - startTime);
+            for (let j = 0; j < stride; j++) newValues.push(values[i * stride + j]);
+          }
         }
-        scene.add(gltf.scene);
-        loadedMapObject = gltf.scene;
-        const mapMeshes = collectMeshes(gltf.scene);
-        // DoubleSide fixes any rendering holes from inconsistent face winding
-        // on this low-poly community export -- purely visual now; physics
-        // collision (below) resolves actual shape contact, not single-ray
-        // hits, so it isn't sensitive to winding the way raycasting was.
-        mapMeshes.forEach(mesh => {
-          const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-          mats.forEach(mat => { if (mat) mat.side = THREE.DoubleSide; });
-        });
-        if (physicsReady) addMapCollidersToPhysics(mapMeshes);
-        else pendingMapMeshesForPhysics = mapMeshes;
-        // Assume the map brings its own floor/geometry -- hide the fallback grid.
-        gridHelper.visible = false;
-        floor.visible = false;
-      },
-      undefined,
-      (err) => {
-        console.warn(`Failed loading map at ${selectedMapPath} -- falling back to the default floor/grid.`, err);
-      }
-    );
-
-    // --- Rapier Physics: real capsule-based character collision ---
-    // Replaces the old per-frame raycast collision system entirely. The
-    // capsule size is fixed (doesn't shrink for crouch -- crouch stays a
-    // camera-only visual dip, same simplification most simpler FPS games make
-    // rather than resizing colliders at runtime).
-    const CAPSULE_RADIUS = 0.35;
-    const CAPSULE_HALF_HEIGHT = 0.45; // half-length of the cylindrical middle section
-    const CAPSULE_FEET_OFFSET = CAPSULE_HALF_HEIGHT + CAPSULE_RADIUS; // capsule center -> feet
-    const MAX_STEP_HEIGHT = 0.4; // how tall a "step" the built-in autostep will climb
-
-    let physicsReady = false;
-    let physicsWorld = null;
-    let characterController = null;
-    let characterBody = null;
-    let characterCollider = null;
-    let mapPhysicsBody = null; // one fixed body every map trimesh collider attaches to
-    let physicsGrounded = false;
-
-    function meshToTrimeshDesc(mesh) {
-      mesh.updateMatrixWorld(true);
-      const posAttr = mesh.geometry.attributes.position;
-      const vertices = new Float32Array(posAttr.count * 3);
-      const v = new THREE.Vector3();
-      for (let i = 0; i < posAttr.count; i++) {
-        v.fromBufferAttribute(posAttr, i);
-        v.applyMatrix4(mesh.matrixWorld);
-        vertices[i * 3] = v.x; vertices[i * 3 + 1] = v.y; vertices[i * 3 + 2] = v.z;
-      }
-      let indices;
-      if (mesh.geometry.index) {
-        indices = Uint32Array.from(mesh.geometry.index.array);
-      } else {
-        indices = new Uint32Array(posAttr.count);
-        for (let i = 0; i < posAttr.count; i++) indices[i] = i;
-      }
-      return RAPIER.ColliderDesc.trimesh(vertices, indices);
+        if (newTimes.length === 0) {
+          let closest = 0, closestDist = Infinity;
+          for (let i = 0; i < times.length; i++) {
+            const d = Math.abs(times[i] - startTime);
+            if (d < closestDist) { closestDist = d; closest = i; }
+          }
+          newTimes.push(0);
+          for (let j = 0; j < stride; j++) newValues.push(values[closest * stride + j]);
+        }
+        const TrackType = track.constructor;
+        return new TrackType(track.name, newTimes, newValues, track.getInterpolation());
+      });
+      return new THREE.AnimationClip(name, endTime - startTime, newTracks);
     }
 
-    function addMapCollidersToPhysics(meshes) {
-      meshes.forEach(mesh => {
-        try {
-          physicsWorld.createCollider(meshToTrimeshDesc(mesh), mapPhysicsBody);
-        } catch (e) {
-          console.warn('Skipping a map mesh for physics (degenerate geometry):', mesh.name, e);
-        }
+    // Per-weapon action timing within each weapon's single combined clip
+    // (seconds), as measured from the Sketchfab description. Knife's
+    // attack3 range looked like a typo (end before start) -- corrected to
+    // continue the sequence (2.68-3.41); flag if that's wrong.
+    const ANIMATION_SEGMENTS = {
+      ar:      { fire: [0.00, 0.25], reload: [2.20, 4.45] },
+      shotgun: { fire: [0.00, 1.13], reload: [1.13, 2.93] },
+      sniper:  { fire: [0.00, 2.00], reload: [2.00, 3.85] },
+      knife:   { attack1: [1.35, 2.00], attack2: [2.00, 2.68], attack3: [2.68, 3.41] }
+    };
+
+    function buildActionClips(type, fullClip) {
+      const segments = ANIMATION_SEGMENTS[type];
+      if (!segments) return;
+      weaponActionClips[type] = {};
+      Object.keys(segments).forEach(action => {
+        const [start, end] = segments[action];
+        weaponActionClips[type][action] = extractTimeRange(fullClip, `${type}_${action}`, start, end);
       });
     }
 
-    async function initPhysics() {
-      // The module bridge script (in <head>) may not have finished importing
-      // Rapier yet by the time this runs -- wait for it if not.
-      if (!window.RAPIER) {
-        await new Promise(resolve => window.addEventListener('rapier-module-ready', resolve, { once: true }));
+    // Plays a one-shot action clip (fire, reload, attackN) on the CURRENTLY
+    // EQUIPPED weapon's own mixer.
+    function playWeaponAction(type, actionName) {
+      const mixer = weaponMixers[type];
+      const clip = weaponActionClips[type] && weaponActionClips[type][actionName];
+      if (!mixer || !clip) return;
+      const action = mixer.clipAction(clip);
+      action.reset();
+      action.setLoop(THREE.LoopOnce, 1);
+      action.clampWhenFinished = true;
+      if (currentAction && currentAction !== action) {
+        action.play();
+        action.crossFadeFrom(currentAction, 0.05, false);
+      } else {
+        action.play();
       }
-      await RAPIER.init();
-      physicsWorld = new RAPIER.World({ x: 0.0, y: -9.81, z: 0.0 });
-
-      // Permanent fallback floor -- safety net so the player can never fall
-      // through the world (e.g. off the map's edge), same role the invisible
-      // `floor` mesh played before.
-      const floorBody = physicsWorld.createRigidBody(RAPIER.RigidBodyDesc.fixed());
-      physicsWorld.createCollider(
-        RAPIER.ColliderDesc.cuboid(50, 0.1, 50).setTranslation(0, -0.1, 0), floorBody
-      );
-
-      mapPhysicsBody = physicsWorld.createRigidBody(RAPIER.RigidBodyDesc.fixed());
-
-      characterController = physicsWorld.createCharacterController(0.02);
-      characterController.enableAutostep(MAX_STEP_HEIGHT, 0.2, true);
-      characterController.enableSnapToGround(0.3);
-      characterController.setMaxSlopeClimbAngle(55 * Math.PI / 180);
-      characterController.setMinSlopeSlideAngle(40 * Math.PI / 180);
-
-      const bodyDesc = RAPIER.RigidBodyDesc.kinematicPositionBased()
-        .setTranslation(0, CAPSULE_FEET_OFFSET, 0);
-      characterBody = physicsWorld.createRigidBody(bodyDesc);
-      characterCollider = physicsWorld.createCollider(
-        RAPIER.ColliderDesc.capsule(CAPSULE_HALF_HEIGHT, CAPSULE_RADIUS), characterBody
-      );
-
-      physicsReady = true;
-      if (pendingMapMeshesForPhysics) {
-        addMapCollidersToPhysics(pendingMapMeshesForPhysics);
-        pendingMapMeshesForPhysics = null;
-      }
+      currentAction = action;
     }
-    initPhysics();
 
-    // Map tuning tool -- also drives the debug-mode (press 9) keyboard controls
-    // when tuning target is set to "map" (press M to switch). Console API still
-    // works too:
-    //   mapTune.rotDeg(90, 0, 0)   -> rotate by degrees, relative to current
-    //   mapTune.pos(0, 0.5, 0)     -> nudge position
-    //   mapTune.scale(1.1)        -> grow/shrink by a multiplier
-    //   mapTune.show()             -> print current transform to paste back
-    // Once it looks right, send me what mapTune.show() prints and I'll bake it
-    // into the code permanently.
-    window.mapTune = {
-      rotDeg(x = 0, y = 0, z = 0) {
-        if (!loadedMapObject) { console.log('Map not loaded (yet, or it failed to load).'); return; }
-        loadedMapObject.rotation.x += THREE.MathUtils.degToRad(x);
-        loadedMapObject.rotation.y += THREE.MathUtils.degToRad(y);
-        loadedMapObject.rotation.z += THREE.MathUtils.degToRad(z);
+    // --- Live calibration tool ---
+    // Open DevTools console (F12) while playing and use these to nudge the
+    // CURRENTLY EQUIPPED weapon's whole model until it looks right, then
+    // copy the final numbers gunTune.show() prints into that weapon's entry
+    // in MODEL_TRANSFORMS above so it's baked in permanently.
+    window.gunTune = {
+      rot(x = 0, y = 0, z = 0) {
+        const t = MODEL_TRANSFORMS[weapons[currentWeaponIdx].type];
+        t.rot[0] += x; t.rot[1] += y; t.rot[2] += z;
+        applyModelTransform(weapons[currentWeaponIdx].type);
         this.show();
       },
       pos(x = 0, y = 0, z = 0) {
-        if (!loadedMapObject) { console.log('Map not loaded (yet, or it failed to load).'); return; }
-        loadedMapObject.position.x += x;
-        loadedMapObject.position.y += y;
-        loadedMapObject.position.z += z;
+        const t = MODEL_TRANSFORMS[weapons[currentWeaponIdx].type];
+        t.pos[0] += x; t.pos[1] += y; t.pos[2] += z;
+        applyModelTransform(weapons[currentWeaponIdx].type);
         this.show();
       },
       scale(mult) {
-        if (!loadedMapObject) { console.log('Map not loaded (yet, or it failed to load).'); return; }
-        loadedMapObject.scale.multiplyScalar(mult);
+        const t = MODEL_TRANSFORMS[weapons[currentWeaponIdx].type];
+        t.scale *= mult;
+        applyModelTransform(weapons[currentWeaponIdx].type);
         this.show();
       },
       show() {
-        if (!loadedMapObject) { console.log('Map not loaded (yet, or it failed to load).'); return; }
-        const r = loadedMapObject.rotation, p = loadedMapObject.position, s = loadedMapObject.scale;
-        console.log('Map transform:', {
-          rotDeg: [r.x, r.y, r.z].map(v => THREE.MathUtils.radToDeg(v).toFixed(1)),
-          pos: [p.x, p.y, p.z].map(v => v.toFixed(3)),
-          scale: s.x.toFixed(4)
-        });
+        const type = weapons[currentWeaponIdx].type;
+        console.log(`${type} model transform:`, JSON.stringify(MODEL_TRANSFORMS[type]));
       }
     };
 
@@ -795,55 +802,26 @@
       gltfLoader.load(
         w.modelPath,
         (gltf) => {
-          loadedModels[w.type] = gltf.scene;
-          if (weapons[currentWeaponIdx].type === w.type) {
-            updateGunMesh();
-          }
+          const wrapper = new THREE.Group();
+          wrapper.add(gltf.scene);
+          gunGroup.add(wrapper);
+          wrapper.visible = false;
+          loadedModels[w.type] = wrapper;
+          applyModelTransform(w.type);
+
+          weaponClips[w.type] = gltf.animations[0];
+          weaponMixers[w.type] = new THREE.AnimationMixer(gltf.scene);
+          buildActionClips(w.type, gltf.animations[0]);
+
+          if (weapons[currentWeaponIdx].type === w.type) updateGunMesh();
         },
         undefined,
-        (err) => { console.warn(`Failed loading model: ${w.modelPath}`, err); }
+        (err) => console.warn(`Failed loading ${w.modelPath}`, err)
       );
     });
 
-    let weaponBobTime = 0;
-    let gunRecoilPos = 0;
-    let gunRecoilRot = 0;
-
-    // Viewmodel Swap Animation Variables
-    let swapOffset = 0;
-    let isSwapping = false;
-
     function updateGunMesh(dir) {
       const w = weapons[currentWeaponIdx];
-
-      // Trigger HUD Slide Animation
-      const hudRow = document.getElementById('hud-weapon-row');
-      if (hudRow && dir) {
-        hudRow.classList.remove('slide-forward', 'slide-backward');
-        void hudRow.offsetWidth;
-        hudRow.classList.add(dir === 'forward' ? 'slide-forward' : 'slide-backward');
-      }
-
-      const attachModel = () => {
-        // Clear old meshes
-        while (gunGroup.children.length > 0) {
-          gunGroup.remove(gunGroup.children[0]);
-        }
-        // Attach 3D model if loaded
-        if (loadedModels[w.type]) {
-          const modelClone = loadedModels[w.type].clone();
-          gunGroup.add(modelClone);
-          applyModelTransform();
-        }
-      };
-
-      if (dir) {
-        isSwapping = true;
-        swapOffset = -0.35;
-        setTimeout(() => { attachModel(); }, 80);
-      } else {
-        attachModel();
-      }
 
       // Update HUD Stat Readouts
       const shotsPerSec = (1000 / w.attackSpeed).toFixed(1);
@@ -870,67 +848,42 @@
       ringWrap.style.opacity = '1';
       ring.style.transition = 'none';
       ring.style.strokeDashoffset = '81.68';
-      // Force reflow so the transition below actually animates from the reset state
       void ring.getBoundingClientRect();
       ring.style.transition = `stroke-dashoffset ${PULLOUT_DELAY_MS}ms linear`;
       ring.style.strokeDashoffset = '0';
       setTimeout(() => { ringWrap.style.opacity = '0'; }, PULLOUT_DELAY_MS);
 
+      const showWeapon = () => {
+        // Each weapon's whole model (hands + gun together) shows/hides as one unit.
+        Object.keys(loadedModels).forEach(type => {
+          loadedModels[type].visible = (type === w.type);
+        });
+
+        const mixer = weaponMixers[w.type];
+        if (mixer && weaponClips[w.type]) {
+          if (currentAction) currentAction.stop();
+          currentAction = mixer.clipAction(weaponClips[w.type]);
+          // TEMPORARY: freeze on the first frame instead of looping the whole
+          // combined idle+reload+fire+ADS reel forever, same placeholder as
+          // before -- no idle-segment timing was given yet.
+          currentAction.play();
+          currentAction.paused = true;
+          currentAction.time = 0;
+          mixer.update(0);
+        }
+      };
+
+      if (dir) {
+        isSwapping = true;
+        swapOffset = -0.35;
+        setTimeout(() => { showWeapon(); }, 80);
+      } else {
+        showWeapon();
+      }
+
       updateAmmoDisplay();
       playSwapSound(w.isMelee);
     }
-
-    // Applies the current weapon's pos/rot/scale correction to whatever
-    // model is currently sitting in gunGroup. Sketchfab downloads each come
-    // in with their own arbitrary export scale/orientation, so every weapon
-    // needs its own correction -- see modelTransform on each weapon entry.
-    function applyModelTransform() {
-      const w = weapons[currentWeaponIdx];
-      const model = gunGroup.children[0];
-      if (!model || !w.modelTransform) return;
-      const t = w.modelTransform;
-      model.position.set(...t.pos);
-      model.rotation.set(...t.rot);
-      model.scale.set(t.scale, t.scale, t.scale);
-    }
-
-    // --- Live calibration tool ---
-    // Open DevTools console (F12) while playing and use these to nudge the
-    // CURRENTLY EQUIPPED weapon's model until it looks right, then copy the
-    // final numbers gunTune.show() prints into that weapon's modelTransform
-    // above (in the weapons array) so it's baked in permanently.
-    //
-    // Examples:
-    //   gunTune.rot(0, 0.1, 0)   -> rotate +0.1 rad around Y
-    //   gunTune.rot(0, -0.1, 0)  -> rotate -0.1 rad around Y
-    //   gunTune.scale(1.1)       -> grow 10%
-    //   gunTune.scale(0.9)       -> shrink 10%
-    //   gunTune.pos(0, 0.05, 0)  -> nudge up
-    //   gunTune.show()           -> print current values to paste back into code
-    window.gunTune = {
-      rot(x = 0, y = 0, z = 0) {
-        const t = weapons[currentWeaponIdx].modelTransform;
-        t.rot[0] += x; t.rot[1] += y; t.rot[2] += z;
-        applyModelTransform();
-        this.show();
-      },
-      pos(x = 0, y = 0, z = 0) {
-        const t = weapons[currentWeaponIdx].modelTransform;
-        t.pos[0] += x; t.pos[1] += y; t.pos[2] += z;
-        applyModelTransform();
-        this.show();
-      },
-      scale(mult) {
-        const t = weapons[currentWeaponIdx].modelTransform;
-        t.scale *= mult;
-        applyModelTransform();
-        this.show();
-      },
-      show() {
-        const w = weapons[currentWeaponIdx];
-        console.log(`${w.name} modelTransform:`, JSON.stringify(w.modelTransform));
-      }
-    };
 
     function updateAmmoDisplay() {
       const w = weapons[currentWeaponIdx];
@@ -1003,20 +956,16 @@
       if (e.code === keybinds.weapon3) switchWeapon(2);
       if (e.code === keybinds.weapon4) switchWeapon(3);
 
-      // Debug mode: press 9 to toggle calibration overlay + keyboard tuning.
-      // Press M to switch what the tuning keys control: current weapon model,
-      // or the loaded map (rotation/position/scale). Rotation: arrow keys +
-      // comma/period. Scale: minus/equals. Position: bracket keys (X), Home/End
-      // (Y), PageUp/PageDown (Z) -- all otherwise-unused keys so nothing
-      // collides with WASD movement.
+      // Debug mode: press 9 to toggle calibration overlay + keyboard tuning
+      // for the currently equipped weapon model. Rotation: arrow keys +
+      // comma/period. Scale: minus/equals. Position: bracket keys (X),
+      // Home/End (Y), PageUp/PageDown (Z) -- all otherwise-unused keys so
+      // nothing collides with WASD movement.
       if (e.code === 'Digit9') {
         debugMode = !debugMode;
         document.getElementById('debug-overlay').style.display = debugMode ? 'block' : 'none';
       }
-      if (debugMode && e.code === 'KeyM') {
-        debugTuneTarget = debugTuneTarget === 'weapon' ? 'map' : 'weapon';
-      }
-      if (debugMode && debugTuneTarget === 'weapon' && weapons[currentWeaponIdx].modelTransform) {
+      if (debugMode) {
         const step = e.shiftKey ? 0.02 : 0.005;
         const scaleStep = e.shiftKey ? 1.05 : 1.01;
         const posStep = e.shiftKey ? 0.02 : 0.005;
@@ -1034,24 +983,6 @@
         if (e.code === 'End') gunTune.pos(0, -posStep, 0);
         if (e.code === 'PageUp') gunTune.pos(0, 0, -posStep);
         if (e.code === 'PageDown') gunTune.pos(0, 0, posStep);
-      } else if (debugMode && debugTuneTarget === 'map' && loadedMapObject) {
-        const rotStep = e.shiftKey ? 15 : 5; // degrees -- map fixes are usually big 90deg corrections
-        const scaleMult = e.shiftKey ? 1.08 : 1.02;
-        const posStep = e.shiftKey ? 1.0 : 0.2;
-        if (e.code === 'ArrowLeft') mapTune.rotDeg(0, -rotStep, 0);
-        if (e.code === 'ArrowRight') mapTune.rotDeg(0, rotStep, 0);
-        if (e.code === 'ArrowUp') mapTune.rotDeg(rotStep, 0, 0);
-        if (e.code === 'ArrowDown') mapTune.rotDeg(-rotStep, 0, 0);
-        if (e.code === 'Comma') mapTune.rotDeg(0, 0, -rotStep);
-        if (e.code === 'Period') mapTune.rotDeg(0, 0, rotStep);
-        if (e.code === 'Minus') mapTune.scale(1 / scaleMult);
-        if (e.code === 'Equal') mapTune.scale(scaleMult);
-        if (e.code === 'BracketLeft') mapTune.pos(-posStep, 0, 0);
-        if (e.code === 'BracketRight') mapTune.pos(posStep, 0, 0);
-        if (e.code === 'Home') mapTune.pos(0, posStep, 0);
-        if (e.code === 'End') mapTune.pos(0, -posStep, 0);
-        if (e.code === 'PageUp') mapTune.pos(0, 0, -posStep);
-        if (e.code === 'PageDown') mapTune.pos(0, 0, posStep);
       }
     });
 
@@ -1115,12 +1046,17 @@
       if (!settings.adminMode && w.reserveMags !== undefined && w.reserveMags <= 0) return; // no spare mags left
       isReloading = true;
       updateAmmoDisplay();
+      playWeaponAction(w.type, 'reload');
+      // Match the gameplay reload timer to the actual reload animation's
+      // length instead of a flat guess, so they land together.
+      const seg = ANIMATION_SEGMENTS[w.type] && ANIMATION_SEGMENTS[w.type].reload;
+      const reloadMs = seg ? (seg[1] - seg[0]) * 1000 : 1200;
       setTimeout(() => {
         if (!settings.adminMode && w.reserveMags !== undefined) w.reserveMags--; // Admin Mode: infinite mags, never consumed
         w.ammo = w.maxAmmo;
         isReloading = false;
         updateAmmoDisplay();
-      }, 1200);
+      }, reloadMs);
     }
 
     let hitmarkerTimeout = null;
@@ -1152,6 +1088,23 @@
 
       lastShotTime = now;
       playGunshotSound(w.type);
+
+      // Credit sustained-fire shake only for an actual shot landing (see the
+      // decay logic in animate()) -- not for merely holding the trigger.
+      sustainedFireTime += SHAKE_PER_SHOT;
+
+      // Fire animation for guns; knife gets a 3-hit combo that advances one
+      // step per attack within the combo window, resetting to the first hit
+      // if you wait too long between swings.
+      if (w.isMelee) {
+        const nowSec = now / 1000;
+        if (nowSec - lastKnifeAttackTime > KNIFE_COMBO_WINDOW) knifeComboIndex = 0;
+        playWeaponAction(w.type, ['attack1', 'attack2', 'attack3'][knifeComboIndex % 3]);
+        knifeComboIndex++;
+        lastKnifeAttackTime = nowSec;
+      } else {
+        playWeaponAction(w.type, 'fire');
+      }
 
       gunRecoilPos = w.isMelee ? 0.15 : 0.25;
       gunRecoilRot = w.isMelee ? -0.3 : 0.18;
@@ -1296,39 +1249,20 @@
     }
 
     function updateDebugOverlay() {
-      const collisionInfo =
+      const w = weapons[currentWeaponIdx];
+      const gt = MODEL_TRANSFORMS[w.type] || { pos: [0, 0, 0], rot: [0, 0, 0], scale: 1 };
+      const physicsInfo =
         `<div class="dbg-title" style="color:#4af">PHYSICS (Rapier)</div>` +
         `ready: ${physicsReady}\n` +
         `grounded: ${dbgGrounded}\n` +
-        `capsule pos: [${dbgBodyPos.x.toFixed(2)}, ${dbgBodyPos.y.toFixed(2)}, ${dbgBodyPos.z.toFixed(2)}]\n` +
-        `velocityY: ${dbgVelocityY.toFixed(3)}\n` +
-        `corrected move: [${dbgCorrected.x.toFixed(3)}, ${dbgCorrected.y.toFixed(3)}, ${dbgCorrected.z.toFixed(3)}]\n\n`;
-
-      if (debugTuneTarget === 'map') {
-        if (!loadedMapObject) {
-          debugOverlayEl.innerHTML = collisionInfo + `<div class="dbg-title">DEBUG MODE -- Map</div>Map not loaded.\n\nPress M to tune weapon instead.\nPress 9 to exit`;
-          return;
-        }
-        const r = loadedMapObject.rotation, p = loadedMapObject.position, s = loadedMapObject.scale;
-        debugOverlayEl.innerHTML =
-          collisionInfo +
-          `<div class="dbg-title">DEBUG MODE -- Map (map${selectedMapNum})</div>` +
-          `pos:     [${[p.x, p.y, p.z].map(v => v.toFixed(3)).join(', ')}]\n` +
-          `rot deg: [${[r.x, r.y, r.z].map(v => THREE.MathUtils.radToDeg(v).toFixed(1)).join(', ')}]\n` +
-          `scale:   ${s.x.toFixed(4)}\n\n` +
-          `Arrows: rotate Y/X (5deg)\n,  .  : rotate Z\n-  =  : scale\n[  ]  : pos X\nHome End: pos Y\nPgUp PgDn: pos Z\n(hold Shift for bigger steps)\nPress M to tune weapon\nPress 9 to exit`;
-        return;
-      }
-      const w = weapons[currentWeaponIdx];
-      if (!w.modelTransform) { debugOverlayEl.innerHTML = collisionInfo + `${w.name} has no model transform.`; return; }
-      const t = w.modelTransform;
+        `capsule pos: [${dbgBodyPos.x.toFixed(2)}, ${dbgBodyPos.y.toFixed(2)}, ${dbgBodyPos.z.toFixed(2)}]\n\n`;
       debugOverlayEl.innerHTML =
-        collisionInfo +
+        physicsInfo +
         `<div class="dbg-title">DEBUG MODE -- ${w.name}</div>` +
-        `pos:   [${t.pos.map(v => v.toFixed(3)).join(', ')}]\n` +
-        `rot:   [${t.rot.map(v => v.toFixed(3)).join(', ')}]\n` +
-        `scale: ${t.scale.toFixed(4)}\n\n` +
-        `Arrows: rotate Y/X\n,  .  : rotate Z\n-  =  : scale\n[  ]  : pos X\nHome End: pos Y\nPgUp PgDn: pos Z\n(hold Shift for bigger steps)\nPress M to tune map\nPress 9 to exit`;
+        `pos:   [${gt.pos.map(v => v.toFixed(3)).join(', ')}]\n` +
+        `rot:   [${gt.rot.map(v => v.toFixed(3)).join(', ')}]\n` +
+        `scale: ${gt.scale.toFixed(4)}\n\n` +
+        `Arrows: rotate Y/X\n,  .  : rotate Z\n-  =  : scale\n[  ]  : pos X\nHome End: pos Y\nPgUp PgDn: pos Z\n(hold Shift for bigger steps)\nPress 9 to exit`;
     }
 
     function animate() {
@@ -1354,25 +1288,20 @@
       // rewards controlled, semi-auto shooting over holding the trigger down.
       recoilPitchOffset = THREE.MathUtils.lerp(recoilPitchOffset, 0, RECOIL_RECOVERY_RATE);
 
-      // Sustained-fire punishment: holding fire on ANY weapon ramps up shake
-      // asymptotically toward SUSTAINED_SHAKE_MAX. Only counts as "actively
-      // shooting" if the weapon can actually fire right now -- holding the
-      // trigger while reloading or dry does NOT build shake. The instant you
-      // stop (release, run dry, or start reloading), shake cuts to zero --
-      // no lingering decay tail.
-      const hasAmmoToFire = w.isMelee || (!isReloading && w.ammo > 0);
-      const qualifiesForShake = isMouseDown && isLocked && hasAmmoToFire;
-      if (qualifiesForShake) {
-        sustainedFireTime += delta;
-      } else {
-        sustainedFireTime = 0;
-      }
+      // Sustained-fire punishment: ramps shake asymptotically toward
+      // SUSTAINED_SHAKE_MAX, but only from ACTUAL SHOTS landing (credited in
+      // shoot()), not from merely holding the trigger down. This decays
+      // continuously every frame, so a slow weapon's isolated shots (far
+      // apart relative to the decay rate) never accumulate into real shake --
+      // only sustained rapid fire does.
+      sustainedFireTime = Math.max(0, sustainedFireTime - delta * SHAKE_DECAY_PER_SEC);
       const shakeIntensity = SUSTAINED_SHAKE_MAX * (1 - Math.exp(-sustainedFireTime / SUSTAINED_SHAKE_TAU));
       shakeOffsetX = (Math.random() - 0.5) * shakeIntensity;
       shakeOffsetY = (Math.random() - 0.5) * shakeIntensity;
-      const crosshairPx = shakeIntensity * 500;
-      crosshairContainer.style.transform =
-        `translate(calc(-50% + ${(Math.random() - 0.5) * crosshairPx}px), calc(-50% + ${(Math.random() - 0.5) * crosshairPx}px))`;
+      // Camera-only shake -- the crosshair stays visually fixed at screen
+      // center (as a crosshair should); the camera shaking under it is what
+      // actually throws off your aim, which is the correct/simpler way to
+      // do this rather than also jittering the crosshair element itself.
 
       camera.rotation.set(0, 0, 0);
       camera.rotation.order = "YXZ";
@@ -1419,10 +1348,7 @@
 
         // Movement + gravity + collision, resolved by Rapier's built-in capsule
         // character controller (handles autostep, slopes, snap-to-ground, and
-        // proper shape-vs-world contact -- replacing the old per-frame raycast
-        // system, which was the source of the auto-teleport and fall-through
-        // bugs since single rays are sensitive to geometry gaps/winding in a
-        // way real shape collision isn't).
+        // proper shape-vs-world contact).
         const targetEyeHeight = isCrouching ? 0.9 : 1.7;
         currentEyeHeight += (targetEyeHeight - currentEyeHeight) * 0.2;
 
@@ -1438,7 +1364,7 @@
           };
           characterController.computeColliderMovement(characterCollider, desiredMovement);
           const corrected = characterController.computedMovement();
-          physicsGrounded = characterController.computedGrounded();
+          const grounded = characterController.computedGrounded();
 
           const pos = characterBody.translation();
           characterBody.setNextKinematicTranslation({
@@ -1446,11 +1372,11 @@
           });
           physicsWorld.step();
 
-          if (physicsGrounded) { velocityY = 0; canJump = true; }
+          if (grounded) { velocityY = 0; canJump = true; }
 
           const bodyPos = characterBody.translation();
           camera.position.set(bodyPos.x, bodyPos.y - CAPSULE_FEET_OFFSET + currentEyeHeight, bodyPos.z);
-          dbgGrounded = physicsGrounded; dbgBodyPos = bodyPos; dbgVelocityY = velocityY; dbgCorrected = corrected;
+          dbgGrounded = grounded; dbgBodyPos = bodyPos;
 
           // Safety net: if physics ever fails to catch a fall (a geometry gap,
           // etc.), don't let the player fall into the void forever -- reset
@@ -1466,10 +1392,11 @@
         // which is the "delay slightly" feel from the notes.
         //
         // R6 Siege-style lean (Q/E) takes priority over the passive strafe lean
-        // when actively held -- it's a deliberate, stronger tilt + a small
-        // sideways peek offset. NOTE: lean direction is my best guess without
-        // being able to see the render -- if Q/E feel swapped, flip the signs
-        // on leanInput below.
+        // when actively held -- it's a deliberate, stronger tilt + a real
+        // sideways peek offset (strengthened from an earlier pass that was
+        // too subtle to actually see around anything). NOTE: lean direction
+        // is my best guess without being able to see the render -- if Q/E
+        // feel swapped, flip the signs on leanInput below.
         let leanInput = 0;
         if (keys['KeyQ']) leanInput -= 1;
         if (keys['KeyE']) leanInput += 1;
@@ -1477,10 +1404,10 @@
         leanOffset = THREE.MathUtils.lerp(leanOffset, leanInput, 0.15);
         const leanDelta = leanOffset - prevLeanOffset;
         const rightX = Math.cos(yaw), rightZ = -Math.sin(yaw);
-        camera.position.x += rightX * leanDelta * 0.5;
-        camera.position.z += rightZ * leanDelta * 0.5;
+        camera.position.x += rightX * leanDelta * LEAN_PEEK_DISTANCE;
+        camera.position.z += rightZ * leanDelta * LEAN_PEEK_DISTANCE;
 
-        const rollTarget = leanInput !== 0 ? -leanOffset * 0.3 : -localStrafeX * 0.05;
+        const rollTarget = leanInput !== 0 ? -leanOffset * 0.4 : -localStrafeX * 0.05;
         cameraRoll = THREE.MathUtils.lerp(cameraRoll, rollTarget, leanInput !== 0 ? 0.15 : 0.06);
         const pitchDipTarget = THREE.MathUtils.clamp(-velocityY * 0.0035, -0.05, 0.05);
         cameraPitchOffset = THREE.MathUtils.lerp(cameraPitchOffset, pitchDipTarget, 0.05);
@@ -1523,6 +1450,9 @@
       const targetFOV = isAiming ? w.zoomFov : (settings.fov + sprintFovBoost);
       camera.fov += (targetFOV - camera.fov) * 0.15;
       camera.updateProjectionMatrix();
+
+      const activeMixer = weaponMixers[weapons[currentWeaponIdx].type];
+      if (activeMixer) activeMixer.update(delta);
 
       updateTargetHPBar();
       drawMinimap();
@@ -1594,6 +1524,31 @@
         const action = btn.getAttribute('data-action');
         if (action && keybinds[action]) btn.textContent = keybinds[action];
       });
+      checkKeybindConflicts();
+    }
+
+    // Flags any keybind buttons that now share the same physical key --
+    // both/all of them get a visible warning highlight and a tooltip naming
+    // what they conflict with, rather than silently letting two actions
+    // fight over one key with no indication anything's wrong.
+    function checkKeybindConflicts() {
+      const btns = Array.from(document.querySelectorAll('.keybind-btn'));
+      const codeGroups = {};
+      btns.forEach(b => {
+        const action = b.getAttribute('data-action');
+        const code = keybinds[action];
+        (codeGroups[code] = codeGroups[code] || []).push(b);
+      });
+      btns.forEach(b => { b.classList.remove('conflict'); b.title = ''; });
+      Object.values(codeGroups).forEach(group => {
+        if (group.length <= 1) return;
+        const labelOf = (b) => b.closest('.setting-row')?.querySelector('label')?.textContent || b.getAttribute('data-action');
+        const labels = group.map(labelOf);
+        group.forEach((b, i) => {
+          b.classList.add('conflict');
+          b.title = `Conflicts with: ${labels.filter((_, j) => j !== i).join(', ')}`;
+        });
+      });
     }
 
     function resetAudio() {
@@ -1617,10 +1572,12 @@
         rebindingBtn.classList.remove('listening');
         rebindingAction = null; rebindingBtn = null;
         window.removeEventListener('keydown', captureKey);
+        checkKeybindConflicts();
       };
       window.addEventListener('keydown', captureKey);
     }
 
+    checkKeybindConflicts(); // catch any conflicts already present at load
     updateGunMesh();
     animate();
 
